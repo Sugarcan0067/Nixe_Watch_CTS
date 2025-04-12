@@ -147,7 +147,8 @@ async def calibrate_device(device):
             print("已連線到裝置。")
             now = datetime.now()
             time_data = build_current_time_bytes(now)
-            print("寫入時間：", now.strftime("%Y-%m-%d %H:%M:%S"))
+            # 打印要寫入的 Hex 值
+            print(f"寫入時間：{now.strftime('%Y-%m-%d %H:%M:%S')} (Hex: {time_data.hex().upper()})")
             await client.write_gatt_char(CURRENT_TIME_CHAR_UUID, time_data)
             print("時間寫入完成。")
             await asyncio.sleep(1)  # 等待裝置更新
