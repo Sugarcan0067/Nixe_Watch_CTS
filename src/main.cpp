@@ -1,25 +1,23 @@
 #include <ArduinoBLE.h>
 #include <TaskScheduler.h>
 
-// CTS 服務和特性的 UUID
+// --- Configuration ---
+#define DEVICE_NAME "S&B Watch"
+#define LED_PIN LED_BUILTIN // 使用內建 LED
+
+// --- CTS UUIDs ---
 const char *ctsServiceUUID = "00001805-0000-1000-8000-00805F9B34FB";
 const char *currentTimeCharUUID = "00002A2B-0000-1000-8000-00805F9B34FB";
 const char *localTimeInfoCharUUID = "00002A0F-0000-1000-8000-00805F9B34FB";
 const char *refTimeInfoCharUUID = "00002A14-0000-1000-8000-00805F9B34FB";
 
-// 建立服務和特性
+// --- BLE Service and Characteristics ---
 BLEService ctsService(ctsServiceUUID);
-BLECharacteristic currentTimeChar(currentTimeCharUUID,
-                                  BLERead | BLENotify,
-                                  10); // 時間數據長度為 10 字節
-BLECharacteristic localTimeInfoChar(localTimeInfoCharUUID,
-                                    BLERead,
-                                    2); // 本地時間信息長度為 2 字節
-BLECharacteristic refTimeInfoChar(refTimeInfoCharUUID,
-                                  BLERead,
-                                  4); // 參考時間信息長度為 4 字節
+BLECharacteristic currentTimeChar(currentTimeCharUUID, BLERead | BLENotify, 10); // 10 bytes for Current Time
+BLECharacteristic localTimeInfoChar(localTimeInfoCharUUID, BLERead, 2);          // 2 bytes for Local Time Information
+BLECharacteristic refTimeInfoChar(refTimeInfoCharUUID, BLERead, 4);              // 4 bytes for Reference Time Information
 
-// 定義簡易時間結構
+// --- Time Structure ---
 struct DateTime
 {
   uint16_t year;
@@ -28,309 +26,327 @@ struct DateTime
   uint8_t hour;
   uint8_t minute;
   uint8_t second;
-  uint8_t dayOfWeek; // 1=周一, 7=周日
+  uint8_t dayOfWeek; // 1 = Monday, 7 = Sunday
 };
 
-// 全局變數
-DateTime currentDateTime = {2023, 10, 10, 12, 0, 0, 2}; // 初始時間設為 2023-10-10 12:00:00 周二
-bool bleInitialized = false;
-unsigned long lastTimeUpdate = 0;
-
-// 定義 LED 腳位
-#define LED_PIN 15 // P0.15 腳位
-
-// 中央設備連接狀態
+// --- Global Variables ---
+DateTime currentDateTime = {2024, 1, 1, 0, 0, 0, 1}; // Initial time: 2024-01-01 00:00:00 Monday
+unsigned long lastTimeUpdateMillis = 0;
 bool centralConnected = false;
 BLEDevice connectedCentral;
-
-// 設置 TaskScheduler
-Scheduler ts;
-
-// 任務聲明 (增加數據更新任務)
-void blinkLedCallback();
-void updateTimeCallback();
-void bleServerCallback();
-void updateServiceDataCallback();
-
-// 任務定義 (增加數據更新任務)
-Task tLedBlink(500, TASK_FOREVER, &blinkLedCallback, &ts, true);
-Task tUpdateTime(1000, TASK_FOREVER, &updateTimeCallback, &ts, true);
-Task tBleServer(100, TASK_FOREVER, &bleServerCallback, &ts, true);
-Task tUpdateServiceData(1000, TASK_FOREVER, &updateServiceDataCallback, &ts, true);
-
-// LED 狀態
 bool ledState = false;
 
-// 更新當前時間
+// --- Task Scheduler ---
+Scheduler ts;
+
+// --- Task Declarations ---
+void blinkLedCallback();
+void updateInternalTimeCallback();
+void updateBleDataCallback();
+void blePollCallback(); // Task for BLE polling
+
+// --- Task Definitions ---
+Task tLedBlink(1000, TASK_FOREVER, &blinkLedCallback, &ts, true);             // Blink LED every 1000ms (slower)
+Task tUpdateTime(1000, TASK_FOREVER, &updateInternalTimeCallback, &ts, true); // Update internal time every second
+Task tUpdateBleData(1500, TASK_FOREVER, &updateBleDataCallback, &ts, true);   // Update BLE characteristics every 1.5 seconds if connected (slower)
+Task tBlePoll(5, TASK_FOREVER, &blePollCallback, &ts, true);                  // Poll BLE events more frequently (every 5ms)
+
+// --- Function Implementations ---
+
+// Calculate days in a given month and year
+uint8_t daysInMonth(uint16_t year, uint8_t month)
+{
+  if (month == 4 || month == 6 || month == 9 || month == 11)
+  {
+    return 30;
+  }
+  else if (month == 2)
+  {
+    // Leap year check
+    bool isLeap = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
+    return isLeap ? 29 : 28;
+  }
+  else
+  {
+    return 31;
+  }
+}
+
+// Update internal time structure
 void updateInternalTime()
 {
-  // 每秒更新一次時間
   unsigned long currentMillis = millis();
-  unsigned long elapsed = currentMillis - lastTimeUpdate;
-
-  if (elapsed >= 1000)
+  if (currentMillis - lastTimeUpdateMillis >= 1000)
   {
-    // 計算經過的秒數
-    uint32_t secondsElapsed = elapsed / 1000;
-    lastTimeUpdate = currentMillis - (elapsed % 1000); // 保留剩餘的毫秒數
+    unsigned long elapsedSeconds = (currentMillis - lastTimeUpdateMillis) / 1000;
+    lastTimeUpdateMillis += elapsedSeconds * 1000;
 
-    // 更新秒數
-    currentDateTime.second += secondsElapsed;
+    currentDateTime.second += elapsedSeconds;
 
-    // 進位處理
+    // Handle rollovers
     if (currentDateTime.second >= 60)
     {
       currentDateTime.minute += currentDateTime.second / 60;
       currentDateTime.second %= 60;
-
       if (currentDateTime.minute >= 60)
       {
         currentDateTime.hour += currentDateTime.minute / 60;
         currentDateTime.minute %= 60;
-
         if (currentDateTime.hour >= 24)
         {
-          currentDateTime.day += currentDateTime.hour / 24;
+          uint8_t daysElapsed = currentDateTime.hour / 24;
+          currentDateTime.day += daysElapsed;
           currentDateTime.hour %= 24;
+          currentDateTime.dayOfWeek = ((currentDateTime.dayOfWeek - 1 + daysElapsed) % 7) + 1;
 
-          // 更新星期幾
-          currentDateTime.dayOfWeek = ((currentDateTime.dayOfWeek - 1) + (currentDateTime.hour / 24)) % 7 + 1;
-
-          // 簡化的月份天數處理 (不考慮閏年)
-          uint8_t daysInMonth = 31; // 默認
-          if (currentDateTime.month == 4 || currentDateTime.month == 6 ||
-              currentDateTime.month == 9 || currentDateTime.month == 11)
+          uint8_t monthDays = daysInMonth(currentDateTime.year, currentDateTime.month);
+          while (currentDateTime.day > monthDays)
           {
-            daysInMonth = 30;
-          }
-          else if (currentDateTime.month == 2)
-          {
-            // 簡單的閏年處理
-            daysInMonth = ((currentDateTime.year % 4 == 0 && currentDateTime.year % 100 != 0) ||
-                           (currentDateTime.year % 400 == 0))
-                              ? 29
-                              : 28;
-          }
-
-          if (currentDateTime.day > daysInMonth)
-          {
-            currentDateTime.day = 1;
+            currentDateTime.day -= monthDays;
             currentDateTime.month++;
-
             if (currentDateTime.month > 12)
             {
               currentDateTime.month = 1;
               currentDateTime.year++;
             }
+            monthDays = daysInMonth(currentDateTime.year, currentDateTime.month);
           }
         }
       }
     }
+    // Serial.print("."); // Indicate time update
   }
 }
 
-// 更新 CTS 特性的時間數據
-void updateCurrentTime()
+// Format and write Current Time characteristic data
+void writeCurrentTime()
 {
-  updateInternalTime(); // 先更新內部時間
-
   uint8_t timeData[10];
-  // 按照 CTS 規範格式化時間數據
-  // 年份 (小端儲存)
   timeData[0] = currentDateTime.year & 0xFF;
   timeData[1] = (currentDateTime.year >> 8) & 0xFF;
-  // 月份 (1-12)
   timeData[2] = currentDateTime.month;
-  // 日期 (1-31)
   timeData[3] = currentDateTime.day;
-  // 星期幾 (1-7, 1=周一)
-  timeData[4] = currentDateTime.dayOfWeek;
-  // 時 (0-23)
-  timeData[5] = currentDateTime.hour;
-  // 分 (0-59)
-  timeData[6] = currentDateTime.minute;
-  // 秒 (0-59)
-  timeData[7] = currentDateTime.second;
-  // 精確度/原因 (一般為 0x00)
-  timeData[8] = 0x00;
-  // 日/時調整索引
-  timeData[9] = 0x00;
+  timeData[4] = currentDateTime.hour;
+  timeData[5] = currentDateTime.minute;
+  timeData[6] = currentDateTime.second;
+  timeData[7] = currentDateTime.dayOfWeek;
+  timeData[8] = 0; // Fractions256
+  timeData[9] = 0; // Adjust Reason
 
-  // 更新特性值
-  currentTimeChar.writeValue(timeData, sizeof(timeData));
+  // Check if writeValue was successful (optional, but good for debugging)
+  if (!currentTimeChar.writeValue(timeData, sizeof(timeData)))
+  {
+    Serial.println("Error writing Current Time characteristic!");
+  }
+  // Serial.println("Current Time Characteristic Updated");
 }
 
-// 更新時區和DST信息
-void updateLocalTimeInfo()
+// Write Local Time Information characteristic data (Example: UTC+8, no DST)
+void writeLocalTimeInfo()
 {
   uint8_t localTimeData[2];
-
-  // 時區 (UTC+8 = +8*4 = +32 (15分鐘為單位))
-  int8_t timeZone = 32; // +8:00
-
-  // DST偏移量 (0 = 標準時間, 1 = +1小時, etc.)
-  uint8_t dstOffset = 0; // 不使用夏令時
+  int8_t timeZone = 32;  // UTC+8 (8 * 4 quarters)
+  uint8_t dstOffset = 0; // Standard Time
 
   localTimeData[0] = timeZone;
   localTimeData[1] = dstOffset;
-
   localTimeInfoChar.writeValue(localTimeData, sizeof(localTimeData));
+  // Serial.println("Local Time Info Characteristic Updated");
 }
 
-// 更新參考時間信息
-void updateRefTimeInfo()
+// Write Reference Time Information characteristic data (Example: Manual source)
+void writeRefTimeInfo()
 {
   uint8_t refTimeData[4];
-
-  // 參考時間源 (0x01 = 網絡時間協議, 0x02 = GPS, 0x03 = 射頻, 0x04 = 手動, 0x05 = 原子鐘, 0x06 = 蜂窩網)
-  refTimeData[0] = 0x04; // 手動設置
-
-  // 準確度 (低4位: 準確度, 高4位: 估計誤差)
-  refTimeData[1] = 0x04; // 100 ppm
-
-  // 每天源的偏移天數 (0x00 表示未知)
-  refTimeData[2] = 0x00;
-
-  // 每天源的偏移時間 (24小時制，以1/256秒為單位的偏移)
-  refTimeData[3] = 0x00;
-
+  refTimeData[0] = 4;   // Source: Manual
+  refTimeData[1] = 254; // Accuracy: Inaccurate (within 5s) or use a specific value if known
+  refTimeData[2] = 0;   // Days since update (unknown)
+  refTimeData[3] = 0;   // Fractions256 since update (unknown)
   refTimeInfoChar.writeValue(refTimeData, sizeof(refTimeData));
+  // Serial.println("Reference Time Info Characteristic Updated");
 }
 
-// LED 閃爍任務回調
+// --- Task Callbacks ---
+
 void blinkLedCallback()
 {
   ledState = !ledState;
-  digitalWrite(LED_PIN, ledState ? HIGH : LOW);
-  Serial.println(ledState ? "LED ON" : "LED OFF");
+  digitalWrite(LED_PIN, ledState);
 }
 
-// 時間更新任務回調
-void updateTimeCallback()
+void updateInternalTimeCallback()
 {
   updateInternalTime();
-  Serial.print("Current Time: ");
-  Serial.print(currentDateTime.year);
-  Serial.print("-");
-  Serial.print(currentDateTime.month);
-  Serial.print("-");
-  Serial.print(currentDateTime.day);
-  Serial.print(" ");
-  Serial.print(currentDateTime.hour);
-  Serial.print(":");
-  Serial.print(currentDateTime.minute);
-  Serial.print(":");
-  Serial.println(currentDateTime.second);
+  // Optional: Print time to Serial for debugging
+  // Serial.printf("%04d-%02d-%02d %02d:%02d:%02d DOW:%d\n",
+  //               currentDateTime.year, currentDateTime.month, currentDateTime.day,
+  //               currentDateTime.hour, currentDateTime.minute, currentDateTime.second,
+  //               currentDateTime.dayOfWeek);
 }
 
-// BLE 服務器任務回調
-void bleServerCallback()
+void updateBleDataCallback()
 {
-  // 如果 BLE 尚未初始化
-  if (!bleInitialized)
-  {
-    if (BLE.begin())
-    {
-      bleInitialized = true;
-
-      // 設置 BLE 名稱
-      BLE.setLocalName("Arduino CTS Server");
-      BLE.setDeviceName("Arduino CTS Server");
-
-      // 添加服務
-      BLE.setAdvertisedService(ctsService);
-      ctsService.addCharacteristic(currentTimeChar);
-      ctsService.addCharacteristic(localTimeInfoChar);
-      ctsService.addCharacteristic(refTimeInfoChar);
-      BLE.addService(ctsService);
-
-      // 初始更新時間和相關信息
-      updateCurrentTime();
-      updateLocalTimeInfo();
-      updateRefTimeInfo();
-
-      // 開始廣播
-      BLE.advertise();
-      Serial.println("BLE CTS Server is advertising");
-      Serial.print("Local MAC address: ");
-      Serial.println(BLE.address());
-    }
-    else
-    {
-      Serial.println("Starting BLE failed!");
-      return;
-    }
-  }
-
-  // 檢查是否有已連接的中央設備
   if (centralConnected)
   {
-    // 檢查連接是否仍然存在
-    if (!connectedCentral.connected())
+    // Update internal time first to ensure latest value is sent
+    updateInternalTime();
+    // Write the current time characteristic
+    writeCurrentTime();
+  }
+}
+
+void blePollCallback()
+{
+  BLE.poll(); // Process BLE events
+}
+
+// --- BLE Event Handlers ---
+
+void blePeripheralConnectHandler(BLEDevice central)
+{
+  Serial.print("Connected event for: ");
+  Serial.println(central.address());
+  digitalWrite(LED_PIN, HIGH); // Turn LED on when connected
+  ledState = HIGH;
+  tLedBlink.disable(); // Stop blinking when connected
+
+  // Check if already connected to avoid race conditions
+  if (!centralConnected)
+  {
+    centralConnected = true;
+    connectedCentral = central; // Store the connected device
+    Serial.println("Connection established.");
+
+    // Update characteristics immediately on connection
+    // Delay slightly before writing to allow connection stabilization
+    delay(50); // Small delay
+    writeCurrentTime();
+    delay(10);
+    writeLocalTimeInfo();
+    delay(10);
+    writeRefTimeInfo();
+    Serial.println("Initial characteristics sent.");
+  }
+  else
+  {
+    Serial.println("Already connected, ignoring duplicate connect event.");
+  }
+}
+
+void blePeripheralDisconnectHandler(BLEDevice central)
+{
+  Serial.print("Disconnected event for: ");
+  Serial.println(central.address());
+  digitalWrite(LED_PIN, LOW); // Turn LED off when disconnected
+  ledState = LOW;
+
+  // Only restart blinking and advertising if we were actually connected
+  if (centralConnected)
+  {
+    centralConnected = false;
+    tLedBlink.enable(); // Start blinking again
+    Serial.println("Connection terminated.");
+
+    // Explicitly stop advertising before restarting
+    BLE.stopAdvertise();
+    Serial.println("Stopped advertising.");
+    delay(100); // Short delay before restarting
+
+    // Restart advertising
+    if (BLE.advertise())
     {
-      Serial.print("Disconnected from central: ");
-      Serial.println(connectedCentral.address());
-      centralConnected = false;
-      // 重新開始廣播
-      BLE.advertise();
+      Serial.println("Restarted advertising.");
     }
     else
     {
-      // 定期更新時間特性 (不使用delay，改由TaskScheduler控制)
-      updateCurrentTime();
+      Serial.println("Failed to restart advertising!");
+      // Consider a more robust recovery like resetting BLE stack or device
     }
   }
   else
   {
-    // 檢查是否有新的中央設備連接
-    BLEDevice central = BLE.central();
-    if (central)
-    {
-      connectedCentral = central;
-      centralConnected = true;
-      Serial.print("Connected to central: ");
-      Serial.println(central.address());
-      Serial.println("Sending initial time information...");
-
-      // 連接後立即發送時間資訊
-      updateCurrentTime();
-      updateLocalTimeInfo();
-      updateRefTimeInfo();
-    }
+    Serial.println("Ignoring disconnect event, was not connected.");
   }
 }
 
-// 添加一個新的任務專門處理數據更新
-void updateServiceDataCallback()
-{
-  if (centralConnected)
-  {
-    // 更新時間特性
-    updateCurrentTime();
-  }
-}
-
+// --- Setup ---
 void setup()
 {
   Serial.begin(9600);
-  while (!Serial)
-    ;
+  // while (!Serial); // Wait for serial port to connect - Needed for some boards
+  delay(1000); // Short delay for stability
+  Serial.println("Starting BLE CTS Server: " DEVICE_NAME);
 
-  Serial.println("Starting CTS Server Example");
-
-  // 初始化 P0.14 腳位
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW); // 起始狀態為關閉
+  digitalWrite(LED_PIN, LOW); // Start with LED off
 
-  // 初始化時間更新變數
-  lastTimeUpdate = millis();
+  // Initialize BLE
+  if (!BLE.begin())
+  {
+    Serial.println("Starting BLE failed!");
+    while (1)
+    { // Halt execution
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      delay(200);
+    }
+  }
 
-  // 初始化連接狀態
-  centralConnected = false;
+  // Set BLE device name
+  BLE.setLocalName(DEVICE_NAME);
+  BLE.setDeviceName(DEVICE_NAME);
+
+  // Add characteristics to the service
+  ctsService.addCharacteristic(currentTimeChar);
+  ctsService.addCharacteristic(localTimeInfoChar);
+  ctsService.addCharacteristic(refTimeInfoChar);
+
+  // Add the service
+  BLE.addService(ctsService);
+
+  // Set advertised service UUID
+  BLE.setAdvertisedService(ctsService); // Advertise the service itself
+
+  // Set initial characteristic values
+  lastTimeUpdateMillis = millis(); // Initialize time tracking
+  updateInternalTime();            // Set initial time struct values
+  writeCurrentTime();
+  writeLocalTimeInfo();
+  writeRefTimeInfo();
+
+  // Assign event handlers
+  BLE.setEventHandler(BLEConnected, blePeripheralConnectHandler);
+  BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
+
+  // Set advertising parameters (optional, use defaults or customize)
+  BLE.setAdvertisingInterval(320); // Slower advertising interval: 200ms (320 * 0.625ms)
+  // Set connection parameters for stability (longer intervals)
+  // Min 30ms, Max 60ms. Supervision Timeout 4 seconds.
+  BLE.setConnectionInterval(0x0018, 0x0030); // 24 * 1.25ms = 30ms, 48 * 1.25ms = 60ms
+  BLE.setSupervisionTimeout(400);            // 400 * 10ms = 4000ms = 4s
+
+  // Start advertising
+  if (BLE.advertise())
+  {
+    Serial.println("Advertising started");
+    Serial.print("MAC Address: ");
+    Serial.println(BLE.address());
+  }
+  else
+  {
+    Serial.println("Advertising failed to start!");
+    // Handle error, maybe retry or halt
+  }
+
+  // Initialize Task Scheduler runner (already done by task creation)
+  Serial.println("Setup complete. Running tasks...");
 }
 
+// --- Loop ---
 void loop()
 {
-  // 執行任務調度器
+  // Execute scheduled tasks
   ts.execute();
+
+  // Add a small delay if loop runs too fast, can sometimes help stability
+  // delay(1); // Uncomment if needed, but tBlePoll should handle polling sufficiently
 }
