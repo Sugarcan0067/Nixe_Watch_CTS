@@ -231,6 +231,19 @@ void currentTimeWrittenHandler(BLEDevice central, BLECharacteristic characterist
   {
     const uint8_t *data = characteristic.value();
 
+    // Print the raw received data
+    Serial.print("  Raw Data Received: [");
+    for (int i = 0; i < 10; i++)
+    {
+      Serial.print("0x");
+      if (data[i] < 0x10)
+        Serial.print("0"); // Add leading zero for single digit hex
+      Serial.print(data[i], HEX);
+      if (i < 9)
+        Serial.print(", ");
+    }
+    Serial.println("]");
+
     // Parse the received data according to CTS Current Time format
     uint16_t year = data[0] | (data[1] << 8);
     uint8_t month = data[2];
@@ -280,6 +293,20 @@ void currentTimeWrittenHandler(BLEDevice central, BLECharacteristic characterist
   {
     Serial.print("Received data with incorrect length: ");
     Serial.println(characteristic.valueLength());
+    // Optionally print the incorrect data as well
+    const uint8_t *data = characteristic.value();
+    int len = characteristic.valueLength();
+    Serial.print("  Raw Data Received: [");
+    for (int i = 0; i < len; i++)
+    {
+      Serial.print("0x");
+      if (data[i] < 0x10)
+        Serial.print("0");
+      Serial.print(data[i], HEX);
+      if (i < len - 1)
+        Serial.print(", ");
+    }
+    Serial.println("]");
   }
 }
 

@@ -141,8 +141,6 @@ async def calibrate_device(device):
     print(f"嘗試連線校時：{device.name} ({device.address})")
     try:
         async with BleakClient(device.address) as client:
-            # 加入連線後延遲
-            await asyncio.sleep(1.0)  # 等待 1 秒
             if not client.is_connected:
                 print("連線失敗。")
                 return
@@ -151,19 +149,14 @@ async def calibrate_device(device):
             time_data = build_current_time_bytes(now)
             # 打印要寫入的 Hex 值
             print(f"寫入時間：{now.strftime('%Y-%m-%d %H:%M:%S')} (Hex: {time_data.hex().upper()})")
-            # 加入寫入前延遲
-            await asyncio.sleep(0.5) # 等待 0.5 秒
-            # 明確使用 write without response
-            await client.write_gatt_char(CURRENT_TIME_CHAR_UUID, time_data, response=False)
+            await client.write_gatt_char(CURRENT_TIME_CHAR_UUID, time_data)
             print("時間寫入完成。")
-            # 增加讀取前回應的等待時間
-            await asyncio.sleep(1.5)  # 等待 1.5 秒讓裝置處理
+            await asyncio.sleep(1)  # 等待裝置更新
             read_data = await client.read_gatt_char(CURRENT_TIME_CHAR_UUID)
             device_time = parse_current_time_bytes(read_data)
             print("讀回裝置時間：", device_time)
     except Exception as e:
-        # 使用 f-string 顯示更清晰的錯誤訊息
-        print(f"校時過程中發生錯誤：{e}")
+        print("校時過程中發生錯誤：", e)
     print("斷開連線。")
 
 async def scanning_loop(config: dict):
