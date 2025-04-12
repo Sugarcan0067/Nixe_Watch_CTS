@@ -356,7 +356,7 @@ void setup()
   Serial.begin(9600);
   // while (!Serial); // Wait for serial port to connect - Needed for some boards
   delay(1000); // Short delay for stability
-  Serial.println("Starting BLE CTS Server: " DEVICE_NAME);
+  Serial.println("Starting BLE CTS Server ver 1 : " DEVICE_NAME);
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW); // Start with LED off
