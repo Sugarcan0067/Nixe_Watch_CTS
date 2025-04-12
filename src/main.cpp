@@ -13,9 +13,10 @@ const char *refTimeInfoCharUUID = "00002A14-0000-1000-8000-00805F9B34FB";
 
 // --- BLE Service and Characteristics ---
 BLEService ctsService(ctsServiceUUID);
-BLECharacteristic currentTimeChar(currentTimeCharUUID, BLERead | BLENotify, 10); // 10 bytes for Current Time
-BLECharacteristic localTimeInfoChar(localTimeInfoCharUUID, BLERead, 2);          // 2 bytes for Local Time Information
-BLECharacteristic refTimeInfoChar(refTimeInfoCharUUID, BLERead, 4);              // 4 bytes for Reference Time Information
+// Add BLEWrite permission to currentTimeChar
+BLECharacteristic currentTimeChar(currentTimeCharUUID, BLERead | BLENotify | BLEWrite, 10); // 10 bytes for Current Time
+BLECharacteristic localTimeInfoChar(localTimeInfoCharUUID, BLERead, 2);                     // 2 bytes for Local Time Information
+BLECharacteristic refTimeInfoChar(refTimeInfoCharUUID, BLERead, 4);                         // 4 bytes for Reference Time Information
 
 // --- Time Structure ---
 struct DateTime
@@ -43,13 +44,15 @@ Scheduler ts;
 void blinkLedCallback();
 void updateInternalTimeCallback();
 void updateBleDataCallback();
-void blePollCallback(); // Task for BLE polling
+void blePollCallback();         // Task for BLE polling
+void printSystemTimeCallback(); // New task declaration
 
 // --- Task Definitions ---
 Task tLedBlink(1000, TASK_FOREVER, &blinkLedCallback, &ts, true);             // Blink LED every 1000ms (slower)
 Task tUpdateTime(1000, TASK_FOREVER, &updateInternalTimeCallback, &ts, true); // Update internal time every second
 Task tUpdateBleData(1500, TASK_FOREVER, &updateBleDataCallback, &ts, true);   // Update BLE characteristics every 1.5 seconds if connected (slower)
 Task tBlePoll(5, TASK_FOREVER, &blePollCallback, &ts, true);                  // Poll BLE events more frequently (every 5ms)
+Task tPrintTime(5000, TASK_FOREVER, &printSystemTimeCallback, &ts, true);     // New task: Print system time every 5 seconds
 
 // --- Function Implementations ---
 
@@ -130,8 +133,8 @@ void writeCurrentTime()
   timeData[5] = currentDateTime.minute;
   timeData[6] = currentDateTime.second;
   timeData[7] = currentDateTime.dayOfWeek;
-  timeData[8] = 0; // Fractions256
-  timeData[9] = 0; // Adjust Reason
+  timeData[8] = 0; // Fractions256 - We don't support setting this via write
+  timeData[9] = 1; // Adjust Reason: Manual time update
 
   // Check if writeValue was successful (optional, but good for debugging)
   if (!currentTimeChar.writeValue(timeData, sizeof(timeData)))
@@ -200,7 +203,85 @@ void blePollCallback()
   BLE.poll(); // Process BLE events
 }
 
+// New Task Callback: Print current system time every 5 seconds
+void printSystemTimeCallback()
+{
+  // Ensure internal time is updated before printing
+  updateInternalTime();
+
+  // Format the time string
+  char timeBuffer[50];
+  snprintf(timeBuffer, sizeof(timeBuffer), "System Time: %04d-%02d-%02d %02d:%02d:%02d DOW:%d",
+           currentDateTime.year, currentDateTime.month, currentDateTime.day,
+           currentDateTime.hour, currentDateTime.minute, currentDateTime.second,
+           currentDateTime.dayOfWeek);
+  // Print the formatted time
+  Serial.println(timeBuffer);
+}
+
 // --- BLE Event Handlers ---
+
+// Handler for when the Current Time characteristic is written by a client
+void currentTimeWrittenHandler(BLEDevice central, BLECharacteristic characteristic)
+{
+  Serial.print("Current Time characteristic written by: ");
+  Serial.println(central.address());
+
+  if (characteristic.valueLength() == 10)
+  {
+    const uint8_t *data = characteristic.value();
+
+    // Parse the received data according to CTS Current Time format
+    uint16_t year = data[0] | (data[1] << 8);
+    uint8_t month = data[2];
+    uint8_t day = data[3];
+    uint8_t hour = data[4];
+    uint8_t minute = data[5];
+    uint8_t second = data[6];
+    uint8_t dayOfWeek = data[7];
+    // uint8_t fractions256 = data[8]; // We ignore fractions and adjust reason on write
+    // uint8_t adjustReason = data[9];
+
+    // Basic validation (optional but recommended)
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 &&
+        hour <= 23 && minute <= 59 && second <= 59 &&
+        dayOfWeek >= 1 && dayOfWeek <= 7)
+    {
+      // Update the internal time structure
+      currentDateTime.year = year;
+      currentDateTime.month = month;
+      currentDateTime.day = day;
+      currentDateTime.hour = hour;
+      currentDateTime.minute = minute;
+      currentDateTime.second = second;
+      currentDateTime.dayOfWeek = dayOfWeek;
+
+      // Reset the internal time update mechanism to sync with the new time
+      lastTimeUpdateMillis = millis();
+
+      Serial.println("Internal time updated by client:");
+      // Use snprintf to format the string into a buffer, then print the buffer
+      char timeBuffer[50]; // Create a buffer to hold the formatted string
+      snprintf(timeBuffer, sizeof(timeBuffer), "  New Time: %04d-%02d-%02d %02d:%02d:%02d DOW:%d",
+               currentDateTime.year, currentDateTime.month, currentDateTime.day,
+               currentDateTime.hour, currentDateTime.minute, currentDateTime.second,
+               currentDateTime.dayOfWeek);
+      Serial.println(timeBuffer); // Print the buffer content
+
+      // Optional: Immediately write the value back to confirm/notify (if needed)
+      // writeCurrentTime(); // Already handled by the periodic update task
+    }
+    else
+    {
+      Serial.println("Received invalid time data format.");
+    }
+  }
+  else
+  {
+    Serial.print("Received data with incorrect length: ");
+    Serial.println(characteristic.valueLength());
+  }
+}
 
 void blePeripheralConnectHandler(BLEDevice central)
 {
@@ -316,6 +397,9 @@ void setup()
   // Assign event handlers
   BLE.setEventHandler(BLEConnected, blePeripheralConnectHandler);
   BLE.setEventHandler(BLEDisconnected, blePeripheralDisconnectHandler);
+
+  // Assign the written handler specifically for the currentTimeChar
+  currentTimeChar.setEventHandler(BLEWritten, currentTimeWrittenHandler);
 
   // Set advertising parameters (optional, use defaults or customize)
   BLE.setAdvertisingInterval(320); // Slower advertising interval: 200ms (320 * 0.625ms)

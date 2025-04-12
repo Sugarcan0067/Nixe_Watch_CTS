@@ -1,0 +1,8 @@
+{
+    "last_device": {
+        "name": "S&B Watch",
+        "address": "42C0B049-F2F4-92F5-178A-884701E6FBD5"
+    },
+    "scan_interval": 5,
+    "sync_interval": 15
+}
